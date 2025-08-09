@@ -2,6 +2,7 @@ import fetch from "node-fetch";
 import chromium from "@sparticuz/chromium";
 import puppeteer from "puppeteer-core";
 import { getStore } from "@netlify/blobs";
+import { setTimeout as sleep } from "node:timers/promises";
 
 // === ENV ===
 const TELEGRAM_BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN;
@@ -92,7 +93,7 @@ async function scrapeAll(page) {
     if (noGrowthRounds >= IDLE_AFTER_NO_GROWTH_ROUNDS) break;
 
     await page.evaluate(() => window.scrollTo({ top: document.body.scrollHeight, behavior: "instant" }));
-    await page.waitForTimeout(WAIT_BETWEEN_SCROLL_MS);
+    await sleep(WAIT_BETWEEN_SCROLL_MS);
   }
 
   const items = await page.evaluate(() => {
