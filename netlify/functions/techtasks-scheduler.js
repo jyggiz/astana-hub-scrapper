@@ -1,32 +1,64 @@
+// netlify/functions/techtasks-scheduler.js
+// ESM module
+
 import fetch from "node-fetch";
 import chromium from "@sparticuz/chromium";
 import puppeteer from "puppeteer-core";
 import { getStore } from "@netlify/blobs";
 import { setTimeout as sleep } from "node:timers/promises";
 
-// === ENV ===
+// ==== ENV ====
 const TELEGRAM_BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN;
 const TELEGRAM_CHANNEL_ID = process.env.TELEGRAM_CHANNEL_ID;
 if (!TELEGRAM_BOT_TOKEN || !TELEGRAM_CHANNEL_ID) {
   throw new Error("Missing TELEGRAM_BOT_TOKEN or TELEGRAM_CHANNEL_ID");
 }
 
-// === CONFIG ===
 const LIST_URL = "https://astanahub.com/ru/tech_task/";
-const MAX_SCROLL_ROUNDS = parseInt(process.env.MAX_SCROLL_ROUNDS || "30", 10);
-const WAIT_BETWEEN_SCROLL_MS = parseInt(process.env.WAIT_BETWEEN_SCROLL_MS || "1500", 10);
-const IDLE_AFTER_NO_GROWTH_ROUNDS = parseInt(process.env.IDLE_AFTER_NO_GROWTH_ROUNDS || "3", 10);
 
-// === DEDUPE via Netlify Blobs ===
-// We store a JSON set of links under key "seen.json"
-const STORE_NAME = "techtasks-seen"; // creates/uses a Blob store with this name
+// Scrolling controls
+const MAX_SCROLL_ROUNDS = parseInt(process.env.MAX_SCROLL_ROUNDS || "60", 10);
+const WAIT_BETWEEN_SCROLL_MS = parseInt(process.env.WAIT_BETWEEN_SCROLL_MS || "1200", 10);
+const IDLE_AFTER_NO_GROWTH_ROUNDS = parseInt(process.env.IDLE_AFTER_NO_GROWTH_ROUNDS || "3", 10);
+const ORDER_NEWEST_FIRST = (process.env.ORDER_NEWEST_FIRST || "true") === "true";
+
+// Dedupe storage (Netlify Blobs)
+const STORE_NAME = "techtasks-seen";
 const SEEN_KEY = "seen.json";
 
+// ===== Helpers =====
 function escapeHtml(s) {
   return s
     .replace(/&/g, "&amp;")
     .replace(/</g, "&lt;")
     .replace(/>/g, "&gt;");
+}
+
+// Parse "до 21.08.25" -> Date.UTC(2025, 7, 21)
+function parseDdMmYyToUTC(dateStr) {
+  if (!dateStr) return null;
+  const clean = dateStr.replace(/^до\s*/i, "").trim();
+  const m = clean.match(/^(\d{2})\.(\d{2})\.(\d{2})$/);
+  if (!m) return null;
+  const d = +m[1], mo = +m[2]; let y = +m[3];
+  if (d < 1 || d > 31 || mo < 1 || mo > 12) return null;
+  // 00–69 => 2000–2069, 70–99 => 1970–1999
+  y += y < 70 ? 2000 : 1900;
+  return new Date(Date.UTC(y, mo - 1, d, 0, 0, 0));
+}
+
+// Start of today in Asia/Almaty (UTC+5), expressed in UTC
+function todayStartUTC_Almaty() {
+  const now = new Date();
+  const offsetMs = 5 * 60 * 60 * 1000; // +05:00
+  const almatyNow = new Date(now.getTime() + offsetMs);
+  const y = almatyNow.getUTCFullYear();
+  const m = almatyNow.getUTCMonth();
+  const d = almatyNow.getUTCDate();
+  return new Date(Date.UTC(y, m, d, 0, 0, 0) - offsetMs);
+}
+function isExpiredByAlmaty(deadlineUTC) {
+  return deadlineUTC < todayStartUTC_Almaty();
 }
 
 function formatForTelegram(item) {
@@ -65,7 +97,7 @@ async function postToTelegram(message, link) {
 
 async function readSeenSet() {
   const store = getStore(STORE_NAME);
-  const blob = await store.get(SEEN_KEY, { type: "json" });
+  const blob = await store.get(SEEN_KEY, { type: "json" }); // may be null on first run
   const arr = Array.isArray(blob) ? blob : [];
   return new Set(arr);
 }
@@ -77,26 +109,78 @@ async function writeSeenSet(seenSet) {
   });
 }
 
-async function scrapeAll(page) {
-  await page.goto(LIST_URL, { waitUntil: "domcontentloaded" });
+// ===== Scrolling & Extraction =====
 
-  let noGrowthRounds = 0;
+/**
+ * Scrolls and stops when:
+ *  - first EXPIRED/MALFORMED deadline is encountered in order, OR
+ *  - content stops growing for a few rounds, OR
+ *  - MAX_SCROLL_ROUNDS reached.
+ * Returns the index (count) of non-expired head to keep (if ORDER_NEWEST_FIRST), else null.
+ */
+async function scrollUntilExpiredOrEnd(page) {
   let lastCount = 0;
+  let noGrowthRounds = 0;
+  let lastExamined = 0;
+  let stopAtCount = null;
 
   for (let i = 0; i < MAX_SCROLL_ROUNDS; i++) {
     const count = await page.$$eval(".techtask-card", els => els.length);
-
-    if (count <= lastCount) noGrowthRounds++;
-    else noGrowthRounds = 0;
+    noGrowthRounds = count <= lastCount ? (noGrowthRounds + 1) : 0;
     lastCount = count;
 
+    // Examine only new portion in display order
+    const res = await page.evaluate(({ start, newestFirst }) => {
+      const base = "https://astanahub.com";
+      const cards = Array.from(document.querySelectorAll(".techtask-card"));
+      const ordered = newestFirst ? cards : cards.slice().reverse();
+      const slice = ordered.slice(start);
+      return slice.map(card => {
+        // Read deadline text quickly (first tech-list-item -> second p -> b)
+        const right = card.querySelector(".right");
+        let deadlineText = "";
+        if (right) {
+          const techItems = right.querySelectorAll("div.tech-list-item");
+          if (techItems[0]) {
+            const ps = techItems[0].querySelectorAll("p");
+            deadlineText = ps[1]?.querySelector("b")?.textContent?.trim() || "";
+          }
+        }
+        // also return link for debugging if needed
+        const linkEl = card.querySelector("a[href]");
+        let link = linkEl ? linkEl.getAttribute("href") : "";
+        if (link && link.startsWith("/")) link = base + link;
+        return { deadlineText, link };
+      });
+    }, { start: lastExamined, newestFirst: ORDER_NEWEST_FIRST });
+
+    // Walk new items and stop at first expired/malformed deadline
+    let foundStop = false;
+    for (let idx = 0; idx < res.length; idx++) {
+      const { deadlineText } = res[idx];
+      const d = parseDdMmYyToUTC(deadlineText);
+      const expiredOrInvalid = !d || isExpiredByAlmaty(d);
+      if (expiredOrInvalid) {
+        const absoluteIndex = lastExamined + idx; // first expired index
+        stopAtCount = ORDER_NEWEST_FIRST ? absoluteIndex : null;
+        foundStop = true;
+        break;
+      }
+    }
+    lastExamined += res.length;
+
+    if (foundStop) break;
     if (noGrowthRounds >= IDLE_AFTER_NO_GROWTH_ROUNDS) break;
 
     await page.evaluate(() => window.scrollTo({ top: document.body.scrollHeight, behavior: "instant" }));
     await sleep(WAIT_BETWEEN_SCROLL_MS);
   }
 
-  const items = await page.evaluate(() => {
+  return stopAtCount;
+}
+
+async function extractAllItems(page) {
+  return page.evaluate(() => {
     const base = "https://astanahub.com";
     const cards = Array.from(document.querySelectorAll(".techtask-card"));
     return cards.map(card => {
@@ -134,12 +218,10 @@ async function scrapeAll(page) {
       return { title, description, client, deadline, taskArea, applications, link };
     });
   });
-
-  return items;
 }
 
+// ===== Handler =====
 export async function handler() {
-  // Launch headless Chromium for serverless
   const executablePath = await chromium.executablePath();
 
   const browser = await puppeteer.launch({
@@ -151,39 +233,54 @@ export async function handler() {
 
   try {
     const page = await browser.newPage();
+    await page.goto(LIST_URL, { waitUntil: "domcontentloaded" });
 
-    const all = await scrapeAll(page);
+    // Scroll until first expired/malformed deadline or natural end
+    const stopAtCount = await scrollUntilExpiredOrEnd(page);
+
+    // Extract everything once, then slice to non-expired head
+    let items = await extractAllItems(page);
+    if (ORDER_NEWEST_FIRST && stopAtCount !== null) {
+      items = items.slice(0, stopAtCount);
+    }
+
     const seen = await readSeenSet();
 
-    // Dedup by link
-    const fresh = all.filter(x => x.link && !seen.has(x.link));
+    // Enforce deadline required + skip expired
+    const filtered = items
+      .filter(x => x.link && !seen.has(x.link))
+      .map(x => {
+        const d = parseDdMmYyToUTC(x.deadline);
+        return { ...x, _deadlineUTC: d };
+      })
+      .filter(x => x._deadlineUTC) // require valid deadline
+      .filter(x => !isExpiredByAlmaty(x._deadlineUTC)); // and not expired
 
-    if (fresh.length === 0) {
+    if (filtered.length === 0) {
       await browser.close();
       return {
         statusCode: 200,
-        body: JSON.stringify({ ok: true, message: "No new tasks." })
+        body: JSON.stringify({ ok: true, message: "No new, valid (non-expired) tasks." })
       };
     }
 
-    for (const item of fresh) {
+    let posted = 0;
+    for (const item of filtered) {
       const msg = formatForTelegram(item);
       try {
         await postToTelegram(msg, item.link);
-        seen.add(item.link);
-        await new Promise(r => setTimeout(r, 800)); // polite pacing
-      } catch (err) {
-        console.error("Failed to post:", err.message);
+        posted++;
+        seen.add(item.link); // mark as seen only on success
+        await sleep(800);    // be polite to Telegram
+      } catch (e) {
+        console.error("Failed to post:", e.message);
       }
     }
 
     await writeSeenSet(seen);
 
     await browser.close();
-    return {
-      statusCode: 200,
-      body: JSON.stringify({ ok: true, posted: fresh.length })
-    };
+    return { statusCode: 200, body: JSON.stringify({ ok: true, posted }) };
   } catch (e) {
     console.error(e);
     try { await browser.close(); } catch {}

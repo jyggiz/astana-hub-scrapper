@@ -1,9 +1,11 @@
+[build]
+  command = ""                    # no frontend build needed
+  functions = "netlify/functions"
+
 [functions]
   node_bundler = "esbuild"
-  # Only keep truly heavy native modules external.
   external_node_modules = ["@sparticuz/chromium", "puppeteer-core"]
 
-# Run every 15 minutes (UTC)
 [[scheduled.functions]]
   name = "techtasks-scheduler"
-  cron = "*/15 * * * *"
+  cron = "*/15 * * * *"          # every 15 minutes (UTC)
