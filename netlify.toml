@@ -1,6 +1,7 @@
 [functions]
   node_bundler = "esbuild"
-  external_node_modules = ["@sparticuz/chromium", "puppeteer-core", "@netlify/blobs"]
+  # Only keep truly heavy native modules external.
+  external_node_modules = ["@sparticuz/chromium", "puppeteer-core"]
 
 # Run every 15 minutes (UTC)
 [[scheduled.functions]]
