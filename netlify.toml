@@ -1,0 +1,8 @@
+[functions]
+  node_bundler = "esbuild"
+  external_node_modules = ["@sparticuz/chromium", "puppeteer-core", "@netlify/blobs"]
+
+# Run every 15 minutes (UTC)
+[[scheduled.functions]]
+  name = "techtasks-scheduler"
+  cron = "*/15 * * * *"

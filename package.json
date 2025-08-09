@@ -1,0 +1,19 @@
+{
+  "name": "astana-hub-scrapper",
+  "version": "1.0.0",
+  "main": "index.js",
+  "scripts": {
+    "dev": "netlify dev"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "description": "",
+  "dependencies": {
+    "@netlify/blobs": "^10.0.8",
+    "@sparticuz/chromium": "^138.0.2",
+    "node-fetch": "^3.3.2",
+    "playwright": "^1.54.2",
+    "puppeteer-core": "^24.16.0"
+  }
+}
