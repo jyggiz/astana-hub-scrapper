@@ -35,15 +35,14 @@ function escapeHtml(s) {
   return s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
 }
 
-// Parse "до 21.08.25" -> Date.UTC(2025, 7, 21)
 function parseDdMmYyToUTC(dateStr) {
   if (!dateStr) return null;
-  const clean = dateStr.replace(/^до\s*/i, "").trim();
+  const clean = dateStr.replace(/^\s*до\s*/i, "").trim(); // drop "до" + spaces
   const m = clean.match(/^(\d{2})\.(\d{2})\.(\d{2})$/);
   if (!m) return null;
   const d = +m[1], mo = +m[2]; let y = +m[3];
   if (d < 1 || d > 31 || mo < 1 || mo > 12) return null;
-  y += y < 70 ? 2000 : 1900; // 00–69 => 2000–2069
+  y += y < 70 ? 2000 : 1900;
   return new Date(Date.UTC(y, mo - 1, d, 0, 0, 0));
 }
 
@@ -203,10 +202,12 @@ async function extractAllItems(page) {
 
       const techItems = right ? Array.from(right.querySelectorAll("div.tech-list-item")) : [];
 
+      // FIRST tech-item inside .right (ignoring .card-avatar-block)
       let deadline = "";
-      if (techItems[0]) {
-        const ps = techItems[0].querySelectorAll("p");
-        deadline = ps[1]?.querySelector("b")?.textContent?.trim() || "";
+      const firstTech = right?.querySelector(".tech-list-item");
+      if (firstTech) {
+        const b = firstTech.querySelector("b");
+        deadline = (b?.textContent || firstTech.textContent || "").trim();
       }
 
       let taskArea = "";
