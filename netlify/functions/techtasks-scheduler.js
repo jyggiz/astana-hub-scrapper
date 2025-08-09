@@ -187,6 +187,10 @@ async function extractAllItems(page) {
   return page.evaluate(() => {
     const base = "https://astanahub.com";
     const cards = Array.from(document.querySelectorAll(".techtask-card"));
+
+    console.log('FOUND CARDS:', cards);
+    console.log('FOUND CARDS LENGTH:', cards.length);
+
     return cards.map(card => {
       const left = card.querySelector(".left");
       const right = card.querySelector(".right");
@@ -246,6 +250,9 @@ export async function handler() {
     if (ORDER_NEWEST_FIRST && stopAtCount !== null) {
       items = items.slice(0, stopAtCount);
     }
+
+    console.log('SCRAPPED ITEMS:', items);
+    console.log('SCRAPPED ITEMS LENGTH:', items.length);
 
     const seen = await readSeenSet();
 
