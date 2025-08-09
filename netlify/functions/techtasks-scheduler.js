@@ -198,8 +198,7 @@ async function extractAllItems(page) {
       const title = left?.querySelector("h2")?.textContent?.trim() || "";
       const description = left?.querySelector("p")?.textContent?.trim() || "";
 
-      const linkEl = card.querySelector("a[href]");
-      let link = linkEl ? linkEl.getAttribute("href") : "";
+      let link = card.getAttribute("href") || "";
       if (link && link.startsWith("/")) link = base + link;
 
       const client = right?.querySelector("div.card-avatar-block div.card-author h4")?.textContent?.trim() || "";
@@ -216,7 +215,7 @@ async function extractAllItems(page) {
 
       let taskArea = "";
       if (techItems[1]) {
-        taskArea = techItems[1]?.querySelector("span b")?.textContent?.trim() || "";
+        taskArea = techItems[1]?.querySelector("span")?.textContent?.trim() || "";
       }
 
       let applications = "";
@@ -255,6 +254,18 @@ export async function handler() {
     console.log('SCRAPPED ITEMS LENGTH:', items.length);
 
     const seen = await readSeenSet();
+
+    const mapDateItems = items.map(x => ({ ...x, _deadlineUTC: parseDdMmYyToUTC(x.deadline) }));
+
+    console.log('MAP DATE ITEMS:', mapDateItems);
+
+    const correctDateItems = mapDateItems.map(x => x._deadlineUTC);
+
+    console.log('CORRECT DATE ITEMS:', correctDateItems);
+
+    const isExpiredByAlmatyItems =  correctDateItems.filter(x => !isExpiredByAlmaty(x._deadlineUTC));
+
+    console.log('IS EXPIRED BY ALMATY ITEMS:', isExpiredByAlmatyItems);
 
     // Enforce deadline required + skip expired + dedupe
     const filtered = items
