@@ -4,7 +4,7 @@
 import fetch from "node-fetch";
 import chromium from "@sparticuz/chromium";
 import puppeteer from "puppeteer-core";
-import { getStore } from "@netlify/blobs";
+import { getStore as _getStore } from "@netlify/blobs";
 import { setTimeout as sleep } from "node:timers/promises";
 
 // ==== ENV ====
@@ -16,22 +16,23 @@ if (!TELEGRAM_BOT_TOKEN || !TELEGRAM_CHANNEL_ID) {
 
 const LIST_URL = "https://astanahub.com/ru/tech_task/";
 
+// Blobs manual config
+const NETLIFY_SITE_ID = process.env.NETLIFY_SITE_ID;
+const NETLIFY_ACCESS_TOKEN = process.env.NETLIFY_ACCESS_TOKEN;
+if (!NETLIFY_SITE_ID || !NETLIFY_ACCESS_TOKEN) {
+  throw new Error("Missing NETLIFY_SITE_ID or NETLIFY_ACCESS_TOKEN for Netlify Blobs manual config");
+}
+const STORE_NAME = "techtasks-seen"; // your blob store name
+
 // Scrolling controls
 const MAX_SCROLL_ROUNDS = parseInt(process.env.MAX_SCROLL_ROUNDS || "60", 10);
 const WAIT_BETWEEN_SCROLL_MS = parseInt(process.env.WAIT_BETWEEN_SCROLL_MS || "1200", 10);
 const IDLE_AFTER_NO_GROWTH_ROUNDS = parseInt(process.env.IDLE_AFTER_NO_GROWTH_ROUNDS || "3", 10);
 const ORDER_NEWEST_FIRST = (process.env.ORDER_NEWEST_FIRST || "true") === "true";
 
-// Dedupe storage (Netlify Blobs)
-const STORE_NAME = "techtasks-seen";
-const SEEN_KEY = "seen.json";
-
 // ===== Helpers =====
 function escapeHtml(s) {
-  return s
-    .replace(/&/g, "&amp;")
-    .replace(/</g, "&lt;")
-    .replace(/>/g, "&gt;");
+  return s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
 }
 
 // Parse "до 21.08.25" -> Date.UTC(2025, 7, 21)
@@ -42,15 +43,14 @@ function parseDdMmYyToUTC(dateStr) {
   if (!m) return null;
   const d = +m[1], mo = +m[2]; let y = +m[3];
   if (d < 1 || d > 31 || mo < 1 || mo > 12) return null;
-  // 00–69 => 2000–2069, 70–99 => 1970–1999
-  y += y < 70 ? 2000 : 1900;
+  y += y < 70 ? 2000 : 1900; // 00–69 => 2000–2069
   return new Date(Date.UTC(y, mo - 1, d, 0, 0, 0));
 }
 
 // Start of today in Asia/Almaty (UTC+5), expressed in UTC
 function todayStartUTC_Almaty() {
   const now = new Date();
-  const offsetMs = 5 * 60 * 60 * 1000; // +05:00
+  const offsetMs = 5 * 60 * 60 * 1000;
   const almatyNow = new Date(now.getTime() + offsetMs);
   const y = almatyNow.getUTCFullYear();
   const m = almatyNow.getUTCMonth();
@@ -63,11 +63,7 @@ function isExpiredByAlmaty(deadlineUTC) {
 
 function formatForTelegram(item) {
   const lines = [];
-  const add = (label, val) => {
-    if (val && String(val).trim()) {
-      lines.push(`<b>${escapeHtml(label)}:</b> ${escapeHtml(String(val).trim())}`);
-    }
-  };
+  const add = (label, val) => val && lines.push(`<b>${escapeHtml(label)}:</b> ${escapeHtml(String(val).trim())}`);
   add("Заголовок", item.title);
   add("Описание", item.description);
   add("Клиент", item.client);
@@ -95,16 +91,26 @@ async function postToTelegram(message, link) {
   }
 }
 
+// ===== Netlify Blobs (manual config) =====
+function getStore() {
+  // Manual siteID/token so this works even without auto-injection
+  return _getStore({
+    name: STORE_NAME,
+    siteID: NETLIFY_SITE_ID,
+    token: NETLIFY_ACCESS_TOKEN,
+  });
+}
+
 async function readSeenSet() {
-  const store = getStore(STORE_NAME);
-  const blob = await store.get(SEEN_KEY, { type: "json" }); // may be null on first run
-  const arr = Array.isArray(blob) ? blob : [];
+  const store = getStore();
+  const json = await store.get("seen.json", { type: "json" }); // null if missing
+  const arr = Array.isArray(json) ? json : [];
   return new Set(arr);
 }
 
 async function writeSeenSet(seenSet) {
-  const store = getStore(STORE_NAME);
-  await store.set(SEEN_KEY, JSON.stringify([...seenSet]), {
+  const store = getStore();
+  await store.set("seen.json", JSON.stringify([...seenSet]), {
     contentType: "application/json",
   });
 }
@@ -136,7 +142,7 @@ async function scrollUntilExpiredOrEnd(page) {
       const ordered = newestFirst ? cards : cards.slice().reverse();
       const slice = ordered.slice(start);
       return slice.map(card => {
-        // Read deadline text quickly (first tech-list-item -> second p -> b)
+        // deadline: first tech-list-item -> second p -> b
         const right = card.querySelector(".right");
         let deadlineText = "";
         if (right) {
@@ -146,7 +152,7 @@ async function scrollUntilExpiredOrEnd(page) {
             deadlineText = ps[1]?.querySelector("b")?.textContent?.trim() || "";
           }
         }
-        // also return link for debugging if needed
+        // also return link if you want to debug
         const linkEl = card.querySelector("a[href]");
         let link = linkEl ? linkEl.getAttribute("href") : "";
         if (link && link.startsWith("/")) link = base + link;
@@ -154,14 +160,13 @@ async function scrollUntilExpiredOrEnd(page) {
       });
     }, { start: lastExamined, newestFirst: ORDER_NEWEST_FIRST });
 
-    // Walk new items and stop at first expired/malformed deadline
+    // Stop at first expired/malformed deadline
     let foundStop = false;
     for (let idx = 0; idx < res.length; idx++) {
-      const { deadlineText } = res[idx];
-      const d = parseDdMmYyToUTC(deadlineText);
+      const d = parseDdMmYyToUTC(res[idx].deadlineText);
       const expiredOrInvalid = !d || isExpiredByAlmaty(d);
       if (expiredOrInvalid) {
-        const absoluteIndex = lastExamined + idx; // first expired index
+        const absoluteIndex = lastExamined + idx;
         stopAtCount = ORDER_NEWEST_FIRST ? absoluteIndex : null;
         foundStop = true;
         break;
@@ -235,10 +240,7 @@ export async function handler() {
     const page = await browser.newPage();
     await page.goto(LIST_URL, { waitUntil: "domcontentloaded" });
 
-    // Scroll until first expired/malformed deadline or natural end
     const stopAtCount = await scrollUntilExpiredOrEnd(page);
-
-    // Extract everything once, then slice to non-expired head
     let items = await extractAllItems(page);
     if (ORDER_NEWEST_FIRST && stopAtCount !== null) {
       items = items.slice(0, stopAtCount);
@@ -246,22 +248,16 @@ export async function handler() {
 
     const seen = await readSeenSet();
 
-    // Enforce deadline required + skip expired
+    // Enforce deadline required + skip expired + dedupe
     const filtered = items
       .filter(x => x.link && !seen.has(x.link))
-      .map(x => {
-        const d = parseDdMmYyToUTC(x.deadline);
-        return { ...x, _deadlineUTC: d };
-      })
-      .filter(x => x._deadlineUTC) // require valid deadline
-      .filter(x => !isExpiredByAlmaty(x._deadlineUTC)); // and not expired
+      .map(x => ({ ...x, _deadlineUTC: parseDdMmYyToUTC(x.deadline) }))
+      .filter(x => x._deadlineUTC)                   // require valid deadline
+      .filter(x => !isExpiredByAlmaty(x._deadlineUTC)); // keep only non-expired
 
     if (filtered.length === 0) {
       await browser.close();
-      return {
-        statusCode: 200,
-        body: JSON.stringify({ ok: true, message: "No new, valid (non-expired) tasks." })
-      };
+      return { statusCode: 200, body: JSON.stringify({ ok: true, message: "No new, valid (non-expired) tasks." }) };
     }
 
     let posted = 0;
@@ -270,8 +266,8 @@ export async function handler() {
       try {
         await postToTelegram(msg, item.link);
         posted++;
-        seen.add(item.link); // mark as seen only on success
-        await sleep(800);    // be polite to Telegram
+        seen.add(item.link);
+        await sleep(800);
       } catch (e) {
         console.error("Failed to post:", e.message);
       }
