@@ -230,7 +230,22 @@ async function extractAllItems(page) {
 }
 
 // ===== Handler =====
-export async function handler() {
+export async function handler(event) {
+  if (event?.queryStringParameters?.action === "seen") {
+  const store = _getStore({
+    name: "techtasks-seen",
+    siteID: process.env.NETLIFY_SITE_ID,
+    token: process.env.NETLIFY_ACCESS_TOKEN,
+  });
+
+  const json = await store.get("seen.json", { type: "json" });
+  return {
+    statusCode: 200,
+    body: JSON.stringify({ ok: true, seen: json || [] }, null, 2)
+  };
+}
+
+  
   const executablePath = await chromium.executablePath();
 
   const browser = await puppeteer.launch({
